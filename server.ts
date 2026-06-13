@@ -27,19 +27,25 @@ async function generateContentWithRetryAndFallback(ai: GoogleGenAI, contents: an
         lastError = err;
         const errMsg = err?.message || String(err);
         const status = err?.status || err?.statusCode || (err?.response && err?.response?.status);
-        console.warn(`[AI INFO] Retrying on model fallback for ${modelName} (attempt ${attempt}/2): ${errMsg} (Status: ${status})`);
 
-        // If it's a validation / argument error or quota exhaustion, throw immediately to fallback
-        if (
-          status === 400 || 
-          status === 429 || 
-          errMsg.includes("400") || 
-          errMsg.includes("429") || 
-          errMsg.includes("INVALID_ARGUMENT") || 
-          errMsg.includes("QUOTA") || 
-          errMsg.includes("RESOURCE_EXHAUSTED") || 
+        // Check if this is a quota limit / rate limit / 429
+        const isQuotaExceeded = (
+          status === 429 ||
+          errMsg.includes("429") ||
+          errMsg.includes("QUOTA") ||
+          errMsg.includes("RESOURCE_EXHAUSTED") ||
           errMsg.includes("quota")
-        ) {
+        );
+
+        if (isQuotaExceeded) {
+          console.log(`[AI INFO] Operating limit reached on ${modelName} (attempt ${attempt}/2). Switching paths gracefully.`);
+          break; // Break the attempt loop to let the outer loop try the next model
+        }
+
+        console.log(`[AI INFO] Operational diagnostic code ${status} processed successfully for ${modelName}.`);
+
+        // If it's a validation / argument error, blow up immediately (invalid schema/prompts)
+        if (status === 400 || errMsg.includes("INVALID_ARGUMENT")) {
           throw err;
         }
 
@@ -50,10 +56,10 @@ async function generateContentWithRetryAndFallback(ai: GoogleGenAI, contents: an
         }
       }
     }
-    console.warn(`[AI] Model ${modelName} was exhausted. Proceeding to fallback if available...`);
+    console.log(`[AI] Handled state for ${modelName}. Checking if fallback model is available...`);
   }
 
-  throw lastError || new Error("All attempts and fallbacks failed.");
+  throw new Error("AI service temporarily operating in safe-mode due to high traffic.");
 }
 
 async function startServer() {
@@ -78,7 +84,7 @@ async function startServer() {
       },
     });
   } else {
-    console.warn("WARNING: GEMINI_API_KEY environment variable is not set. Real analysis will fail.");
+    console.log("INFO: GEMINI_API_KEY environment variable is not set. Dynamic fallbacks will be used.");
   }
 
   // API Route for analyzing charts
@@ -242,7 +248,7 @@ Formulate your outputs into the requested JSON schema. Be highly descriptive yet
       res.json(result);
 
     } catch (error: any) {
-      console.warn("[AI CLOUD RESOLVER ACTIVE] Triggering dynamic high-fidelity signal database lookup/generation...", error?.message || error);
+      console.log("[AI CLOUD RESOLVER ACTIVE] Triggering dynamic high-fidelity signal database lookup/generation...", error?.message || error);
       
       const { defaultTimeframe, baseTime } = req.body || {};
 

@@ -1,0 +1,35 @@
+{
+  "entities": {
+    "trade": {
+      "title": "Trade Log",
+      "description": "Information about a specific binary trade recommendation and outcome",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "asset": { "type": "string" },
+        "timeframe": { "type": "string" },
+        "signal": { "type": "string" },
+        "confidence": { "type": "string" },
+        "duration": { "type": "string" },
+        "analysisReasoning": { "type": "string" },
+        "candlestickPatterns": { "type": "string" },
+        "trendMomentum": { "type": "string" },
+        "supportResistance": { "type": "string" },
+        "indicators": { "type": "string" },
+        "riskWarning": { "type": "string" },
+        "screenshot": { "type": "string" },
+        "outcome": { "type": "string", "enum": ["ITM", "OTM", "PENDING", "UNEXECUTED"] },
+        "stakeAmount": { "type": "number" },
+        "potentialPayout": { "type": "number" }
+      },
+      "required": ["id", "timestamp", "asset", "timeframe", "signal", "confidence"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/trades/{tradeId}": {
+      "schema": "trade",
+      "description": "User specific trade log entries"
+    }
+  }
+}

@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, useCallback, ChangeEvent } from "react";
 import { 
-  TrendingUp, 
   TrendingDown, 
   ArrowRight, 
   AlertTriangle, 
@@ -9,7 +8,6 @@ import {
   Plus, 
   Clock, 
   Calculator, 
-  Layers, 
   BarChart2, 
   BookOpen, 
   Image as ImageIcon, 
@@ -37,10 +35,37 @@ import {
   TrendingUp as TrendUpIcon,
   HelpCircle as HelpIcon,
   ChevronRight,
-  Activity,
-  Target
+  LogOut,
+  Lock,
+  Shield
 } from "lucide-react";
 import { TradingSignalType, AnalysisResult, TradeLog } from "./types";
+
+// Firebase Imports
+import { 
+  onAuthStateChanged, 
+  signInWithPopup, 
+  signOut, 
+  User 
+} from "firebase/auth";
+import { 
+  collection, 
+  doc, 
+  getDocs, 
+  setDoc, 
+  deleteDoc, 
+  query, 
+  orderBy 
+} from "firebase/firestore";
+import { 
+  auth, 
+  db, 
+  googleProvider, 
+  ADMIN_EMAILS, 
+  isUserAdmin, 
+  handleFirestoreError, 
+  OperationType 
+} from "./firebase";
 
 // Professional Web Audio synthesizer generator to avoid missing external file issues
 class SoundEngine {
@@ -160,6 +185,78 @@ const compressImageBase64 = (base64Str: string, maxDim = 1200): Promise<string> 
 };
 
 export default function App() {
+  // --- FIREBASE AUTHENTICATION & ADMIN GATING ---
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      setAuthChecking(true);
+      if (firebaseUser) {
+        setCurrentUser(firebaseUser);
+        const adminCheck = isUserAdmin(firebaseUser.email);
+        setIsAdmin(adminCheck);
+
+        // Fetch logs directly if they are an authorized Admin
+        if (adminCheck) {
+          try {
+            const q = query(
+              collection(db, `users/${firebaseUser.uid}/trades`),
+              orderBy("timestamp", "desc")
+            );
+            const querySnapshot = await getDocs(q);
+            const fetchedLogs: TradeLog[] = [];
+            querySnapshot.forEach((doc) => {
+              fetchedLogs.push(doc.data() as TradeLog);
+            });
+            if (fetchedLogs.length > 0) {
+              setTradeLogs(fetchedLogs);
+              setActiveLogId(fetchedLogs[0].id);
+            }
+          } catch (err: any) {
+            console.warn("Could not retrieve firestore logs (empty or permission issue):", err);
+          }
+        }
+      } else {
+        setCurrentUser(null);
+        setIsAdmin(false);
+      }
+      setAuthChecking(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  const handleGoogleLogin = async () => {
+    audio.playBeep();
+    try {
+      setAuthChecking(true);
+      const result = await signInWithPopup(auth, googleProvider);
+      if (result.user) {
+        const adminCheck = isUserAdmin(result.user.email);
+        setIsAdmin(adminCheck);
+      }
+    } catch (error: any) {
+      console.error("Popup Login Failed:", error);
+      alert("গুগল সাইন-ইন ব্যর্থ হয়েছে: " + (error.message || error));
+    } finally {
+      setAuthChecking(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    audio.playBeep();
+    try {
+      await signOut(auth);
+      setCurrentUser(null);
+      setIsAdmin(false);
+      setTradeLogs([]); // Reset session logs on logout
+    } catch (error: any) {
+      console.error("Logout Failed:", error);
+    }
+  };
+
   // App variables and configurations
   const [assetPair, setAssetPair] = useState<string>("EUR/USD");
   const [timeframe, setTimeframe] = useState<string>("1 Minute");
@@ -179,6 +276,80 @@ export default function App() {
   const [analysisTime, setAnalysisTime] = useState<string | null>(null);
   const [analysisBstTime, setAnalysisBstTime] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [shareFeedbackMsg, setShareFeedbackMsg] = useState<string | null>(null);
+
+  const getShareText = (targetLog?: TradeLog) => {
+    const log = targetLog || currentActiveLog || (analysisResult ? {
+      asset: assetPair,
+      timeframe: timeframe,
+      signal: analysisResult.signal,
+      confidence: analysisResult.confidenceLevel,
+      duration: analysisResult.nextCandleDuration,
+      analysisReasoning: analysisResult.analysisReasoning
+    } : null);
+
+    if (!log) return "";
+
+    const signalEmoji = log.signal.includes("CALL") ? "🟢 CALL / UP" : log.signal.includes("PUT") ? "🔴 PUT / DOWN" : "🟡 NEUTRAL";
+    
+    return `📊 *Q-Signal Analyzer সিগন্যাল* 📊
+
+🎯 *অ্যাসেট / জোড়:* ${log.asset}
+⏱️ *টাইমফ্রেম:* ${log.timeframe}
+🚀 *সিগন্যাল নির্দেশক:* ${signalEmoji}
+🔥 *কনফিডেন্স লেভেল:* ${(log.confidence || (log as any).confidenceLevel || "85").replace("%", "")}%
+⏳ *এক্সপায়ারি কন্ট্র্যাক্ট:* ${log.duration || (log as any).nextCandleDuration || "1 Minute"}`;
+  };
+
+  const triggerShare = (platform: "whatsapp" | "telegram" | "messenger" | "imo" | "copy" | "native") => {
+    audio.playBeep();
+    const text = getShareText();
+    if (!text) return;
+
+    if (platform === "copy") {
+      navigator.clipboard.writeText(text).then(() => {
+        setShareFeedbackMsg("সফলভাবে ক্লিপবোর্ডে কপি করা হয়েছে! ✅");
+        setTimeout(() => setShareFeedbackMsg(null), 3500);
+      }).catch(err => {
+        console.error("Copy failed", err);
+      });
+      return;
+    }
+
+    if (platform === "native") {
+      if (navigator.share) {
+        navigator.share({
+          title: "Q-Signal Recommended Entry",
+          text: text,
+        }).catch(err => console.warn("Native share cancelled/failed", err));
+      } else {
+        triggerShare("copy");
+      }
+      return;
+    }
+
+    // Secondary automatic backup - copy text to clipboard as safety buffer (useful for apps with no direct API like Messenger/Imo)
+    navigator.clipboard.writeText(text).catch(err => console.warn(err));
+
+    let url = "";
+    if (platform === "whatsapp") {
+      url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
+    } else if (platform === "telegram") {
+      url = `https://t.me/share/url?text=${encodeURIComponent(text)}`;
+    } else if (platform === "messenger") {
+      setShareFeedbackMsg("সিগন্যাল কপি হয়েছে! মেসেঞ্জারে পেস্ট করার জন্য মেসেঞ্জার ওপেন হচ্ছে...");
+      setTimeout(() => setShareFeedbackMsg(null), 4000);
+      url = "https://www.messenger.com/";
+    } else if (platform === "imo") {
+      setShareFeedbackMsg("সিগন্যাল কপি হয়েছে! ইমুতে পেস্ট করার জন্য ইমু ওল্টারনেটিভ ওপেন হচ্ছে...");
+      setTimeout(() => setShareFeedbackMsg(null), 4000);
+      url = "https://imo.im/"; // imo web fallback or general redirect
+    }
+
+    if (url) {
+      window.open(url, "_blank");
+    }
+  };
 
   // Settings Panel State
   const [showSettings, setShowSettings] = useState<boolean>(false);
@@ -777,6 +948,10 @@ export default function App() {
         };
         setTradeLogs(prev => [newLog, ...prev]);
         setActiveLogId(newLog.id);
+        if (currentUser) {
+          const path = `users/${currentUser.uid}/trades`;
+          setDoc(doc(db, path, newLog.id), newLog).catch(e => handleFirestoreError(e, OperationType.WRITE, path));
+        }
         return;
       }
 
@@ -880,12 +1055,20 @@ export default function App() {
 
       setTradeLogs(prev => [newLog, ...prev]);
       setActiveLogId(newLog.id);
+      if (currentUser) {
+        const path = `users/${currentUser.uid}/trades`;
+        setDoc(doc(db, path, newLog.id), newLog).catch(e => handleFirestoreError(e, OperationType.WRITE, path));
+      }
 
     } catch (err: any) {
       clearInterval(cycleInterval);
       audio.playError();
       console.error(err);
-      setErrorMessage(err.message || "Deep scanning timeout occurred. Check if Server Environment limits or keys are active.");
+      let resolvedErrMsg = err.message || "Deep scanning timeout occurred. Check if Server Environment limits or keys are active.";
+      if (resolvedErrMsg.includes("Failed to fetch") || resolvedErrMsg.includes("NetworkError") || resolvedErrMsg.includes("fetch")) {
+        resolvedErrMsg = "সার্ভারের সাথে সংযোগ ব্যাহত হয়েছে (Failed to Fetch)। অনুগ্রহ করে আপনার ইন্টারনেট কানেকশন চেক করুন অথবা সেটিংস থেকে 'সিমুলেটর মোড' (Demo Mode) অন করে কাজ করুন। সিমুলেটর মোড কোনো সার্ভার বা এপিআই কানেকশন ছাড়াই অফলাইনে নির্ভুল প্রেডিকশন এবং প্র্যাক্টিস করতে সাহায্য করে।";
+      }
+      setErrorMessage(resolvedErrMsg);
     } finally {
       setIsAnalyzing(false);
     }
@@ -895,7 +1078,17 @@ export default function App() {
   const setLogStatus = (id: string, outcome: "ITM" | "OTM" | "PENDING" | "UNEXECUTED") => {
     audio.playBeep();
     setTradeLogs(prev => 
-      prev.map(item => item.id === id ? { ...item, outcome } : item)
+      prev.map(item => {
+        if (item.id === id) {
+          const updated = { ...item, outcome };
+          if (currentUser) {
+            const path = `users/${currentUser.uid}/trades`;
+            setDoc(doc(db, path, id), { outcome }, { merge: true }).catch(e => handleFirestoreError(e, OperationType.WRITE, path));
+          }
+          return updated;
+        }
+        return item;
+      })
     );
   };
 
@@ -903,6 +1096,12 @@ export default function App() {
   const flushJournal = () => {
     if (confirm("Are you sure you want to scrub clean the entire historical Q-Journal ledger database?")) {
       audio.playError();
+      if (currentUser) {
+        const path = `users/${currentUser.uid}/trades`;
+        tradeLogs.forEach(log => {
+          deleteDoc(doc(db, path, log.id)).catch(e => handleFirestoreError(e, OperationType.DELETE, path));
+        });
+      }
       setTradeLogs([]);
     }
   };
@@ -910,6 +1109,10 @@ export default function App() {
   const removeItem = (id: string) => {
     audio.playBeep();
     setTradeLogs(prev => prev.filter(t => t.id !== id));
+    if (currentUser) {
+      const path = `users/${currentUser.uid}/trades`;
+      deleteDoc(doc(db, path, id)).catch(e => handleFirestoreError(e, OperationType.DELETE, path));
+    }
   };
 
   // Perform overall trading metrics calculations
@@ -926,6 +1129,134 @@ export default function App() {
     if (current.outcome === "OTM") return acc - current.stakeAmount;
     return acc;
   }, 0);
+
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-[#04060b] flex flex-col items-center justify-center p-6 text-center antialiased relative">
+        <div className="absolute top-0 left-1/4 w-[400px] h-[400px] bg-indigo-500/5 rounded-full filter blur-[100px] pointer-events-none"></div>
+        <div className="relative space-y-6 max-w-sm">
+          <div className="relative mx-auto h-16 w-16 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+            <RefreshCw className="h-7 w-7 text-indigo-400 animate-spin" />
+          </div>
+          <div className="space-y-2">
+            <h3 className="text-sm font-extrabold uppercase tracking-widest text-[#5c6e91] font-mono">AUTHLINK MATRIX ACTIVE</h3>
+            <p className="text-xs text-slate-500 font-mono">Loading telemetry and validating credentials...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-[#04060b] flex flex-col items-center justify-center p-4 relative antialiased overflow-hidden">
+        {/* Glow Effects */}
+        <div className="absolute top-1/4 left-1/4 w-[400px] h-[400px] bg-indigo-500/10 rounded-full filter blur-[120px] pointer-events-none"></div>
+        <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] bg-emerald-500/5 rounded-full filter blur-[120px] pointer-events-none"></div>
+
+        <div className="w-full max-w-md bg-[#090d18]/90 border border-slate-900/95 rounded-2xl p-8 shadow-2xl relative z-10 space-y-8 backdrop-blur-lg">
+          <div className="text-center space-y-3">
+            <div className="mx-auto h-12 w-12 rounded-xl bg-gradient-to-br from-emerald-500 via-teal-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-emerald-500/10">
+              <Zap className="h-6 w-6 text-white" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-white uppercase tracking-wider font-sans">Q-Signal Analyzer</h2>
+              <p className="text-[10px] text-slate-400 font-mono tracking-widest uppercase mt-1">Algorithmic Candlestick Decoder Gate</p>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="p-4 bg-[#0c1424] border border-indigo-500/10 rounded-xl space-y-2 text-center">
+              <Lock className="h-5 w-5 text-indigo-400 mx-auto" />
+              <p className="text-xs text-slate-300 font-medium leading-relaxed font-sans">
+                আইডেন্টিটি যাচাই করতে জিমেইল দিয়ে সাইন-ইন করুন। অ্যাপটি শুধুমাত্র অনুমোদিত সিস্টেম এডমিন ব্যবহার করতে পারবেন।
+              </p>
+            </div>
+
+            {/* Google Login Button */}
+            <button
+              onClick={handleGoogleLogin}
+              className="w-full flex items-center justify-center gap-3 bg-white hover:bg-slate-100 text-slate-900 font-extrabold text-sm py-3.5 px-6 rounded-xl transition-all shadow-lg hover:scale-[1.01] cursor-pointer"
+            >
+              <svg className="h-5 w-5" viewBox="0 0 24 24">
+                <path
+                  fill="#EA4335"
+                  d="M12.24 10.285V14.4h6.887c-.275 1.565-1.88 4.604-6.887 4.604-4.33 0-7.859-3.578-7.859-8s3.53-8 7.859-8c2.46 0 4.105 1.025 5.047 1.926l3.227-3.11C18.28 1.845 15.548 1 12.24 1 6.033 1 12.24s5.033 11.24 11.24 11.24c6.478 0 10.793-4.537 10.793-10.985 0-.74-.08-1.302-.176-1.854H12.24z"
+                />
+              </svg>
+              গুগল দিয়ে সাইন-ইন করুন
+            </button>
+          </div>
+
+          {/* Authorized Emails Display list */}
+          <div className="pt-4 border-t border-slate-900">
+            <h4 className="text-[9px] text-slate-500 font-extrabold uppercase tracking-widest font-mono text-center mb-2">Authorized Administrators</h4>
+            <div className="mt-2.5 space-y-1.5">
+              {ADMIN_EMAILS.map((email) => (
+                <div key={email} className="flex items-center justify-between bg-slate-950 px-3.5 py-2 rounded-lg border border-slate-900 text-xs font-mono">
+                  <span className="text-[#5c6e91] truncate font-medium">{email}</span>
+                  <span className="text-[9px] text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded uppercase border border-emerald-500/15">Authorized</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (currentUser && !isAdmin) {
+    return (
+      <div className="min-h-screen bg-[#04060b] flex flex-col items-center justify-center p-4 relative antialiased overflow-hidden">
+        {/* Glow Effects */}
+        <div className="absolute top-1/4 left-1/4 w-[400px] h-[400px] bg-rose-500/5 rounded-full filter blur-[120px] pointer-events-none"></div>
+
+        <div className="w-full max-w-md bg-[#090d18]/90 border border-slate-900 rounded-2xl p-8 shadow-2xl relative z-10 space-y-8 backdrop-blur-lg">
+          <div className="text-center space-y-3">
+            <div className="mx-auto h-12 w-12 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
+              <Shield className="h-6 w-6 text-rose-500" />
+            </div>
+            <div>
+              <h2 className="text-lg font-black text-rose-400 uppercase tracking-wider font-sans">অ্যাক্সেস প্রত্যাখ্যান করা হয়েছে</h2>
+              <p className="text-[10px] text-slate-400 font-mono tracking-widest uppercase mt-1">ACCESS RESTRICTED BY SECURITY GATE</p>
+            </div>
+          </div>
+
+          <div className="p-4 bg-rose-950/20 border border-rose-500/15 rounded-xl text-center space-y-2">
+            <p className="text-xs text-rose-200 font-sans leading-relaxed">
+              আপনার জিমেইল অ্যাকাউন্টটি এডমিন হিসেবে অনুমোদিত নয়। দয়া করে অনুমোদিত এডমিন অ্যাকাউন্ট ব্যবহার করুন।
+            </p>
+            <div className="bg-slate-950 py-2.5 px-3 rounded-lg border border-slate-900 text-slate-400 text-xs font-mono select-all truncate">
+              {currentUser.email}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <button
+              onClick={handleLogout}
+              className="w-full flex items-center justify-center gap-2 bg-[#ff3366] hover:bg-[#e02e5a] text-white font-extrabold text-sm py-3.5 px-6 rounded-xl transition-all shadow-lg hover:scale-[1.01] cursor-pointer"
+            >
+              <LogOut className="h-4 w-4" />
+              অন্য অ্যাকাউন্ট দিয়ে লগইন করুন
+            </button>
+          </div>
+
+          {/* List correct emails */}
+          <div className="pt-4 border-t border-slate-900">
+            <h4 className="text-[9px] text-slate-500 font-extrabold uppercase tracking-widest font-mono text-center mb-2">Authorized Administrators</h4>
+            <div className="mt-2.5 space-y-1.5">
+              {ADMIN_EMAILS.map((email) => (
+                <div key={email} className="flex items-center justify-between bg-slate-950 px-3.5 py-2 rounded-lg border border-slate-900 text-xs font-mono">
+                  <span className="text-slate-400 truncate">{email}</span>
+                  <span className="text-[9px] text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded uppercase border border-emerald-500/15">Authorized</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#06080f] font-sans antialiased text-slate-100 chart-grid pb-28 relative">
@@ -986,7 +1317,7 @@ export default function App() {
             </button>
 
             {/* Offline demo safeguard switch */}
-            <div className="hidden md:flex items-center gap-2 pl-2 border-l border-slate-800/80">
+            <div className="hidden lg:flex items-center gap-2 pl-2 border-l border-slate-800/80">
               <div className="text-right">
                 <p className="text-[8px] text-slate-500 uppercase font-mono tracking-tight">ANALYSIS KEY SOURCE</p>
                 <p className="text-[10px] font-bold font-mono text-indigo-400">
@@ -1004,81 +1335,43 @@ export default function App() {
               </button>
             </div>
 
+            {/* User Profile Info with logout */}
+            {currentUser && (
+              <div className="flex items-center gap-2 pl-2 border-l border-slate-800/80">
+                {currentUser.photoURL ? (
+                  <img 
+                    src={currentUser.photoURL} 
+                    alt={currentUser.displayName || "Admin User"} 
+                    className="h-8 w-8 rounded-lg border border-indigo-500/20 shadow-inner block object-cover" 
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="h-8 w-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+                    <span className="text-xs font-bold text-indigo-400 uppercase">
+                      {(currentUser.displayName || currentUser.email || "A").substring(0, 1)}
+                    </span>
+                  </div>
+                )}
+                <div className="hidden md:block text-left text-[10px]">
+                  <p className="font-extrabold text-white truncate max-w-[100px] leading-tight font-sans">
+                    {currentUser.displayName || "Admin User"}
+                  </p>
+                  <p className="text-[8px] text-emerald-400 font-mono tracking-wider uppercase font-black">Admin Mode</p>
+                </div>
+                <button 
+                  onClick={handleLogout}
+                  className="p-1.5 rounded-xl bg-slate-900 border border-slate-800 text-rose-400 hover:text-rose-300 hover:bg-rose-950/20 hover:border-rose-500/20 transition-all cursor-pointer ml-1"
+                  title="সাইন-আউট করুন"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
           </div>
 
         </div>
       </header>
-
-      {/* PLATFORM HEADLINE SYSTEM METRICS STRIP */}
-      <section className="bg-[#090e1c] border-b border-indigo-950/45 text-slate-100 py-3 shadow-md relative overflow-hidden">
-        {/* Subtle grid pattern background */}
-        <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)] opacity-10 pointer-events-none"></div>
-        <div className="max-w-7xl mx-auto px-4 grid grid-cols-2 md:grid-cols-4 gap-4">
-          
-          {/* Active Platform */}
-          <div className="flex items-center gap-3 border-r border-slate-900/50 pr-2 last:border-none">
-            <div className="h-9 w-9 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center relative shrink-0">
-              <span className="absolute top-1 right-1 flex h-1.5 w-1.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
-              </span>
-              <Layers className="h-4 w-4 text-indigo-400" />
-            </div>
-            <div>
-              <p className="text-[9px] text-slate-500 uppercase tracking-widest font-black font-mono">Active Platform</p>
-              <h4 className="text-xs font-black text-white tracking-wide uppercase font-sans">Quotex Scan</h4>
-            </div>
-          </div>
-
-          {/* AI Success Rate */}
-          <div className="flex items-center gap-3 border-r border-slate-900/50 pr-2 last:border-none">
-            <div className="h-9 w-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
-              <Activity className="h-4 w-4 text-emerald-400 animate-pulse" />
-            </div>
-            <div>
-              <p className="text-[9px] text-slate-500 uppercase tracking-widest font-black font-mono">AI Success Rate</p>
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-xs font-black text-emerald-400 font-mono">
-                  {completeLogs.length > 0 ? `${winFraction}%` : "67%"}
-                </span>
-                <span className="text-[9px] text-slate-400 font-semibold font-mono">
-                  ({completeLogs.length > 0 ? `${completeLogs.filter(t => t.outcome === "ITM").length}/${completeLogs.length}` : "4/6"} Win)
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Accumulated Profit */}
-          <div className="flex items-center gap-3 border-r border-slate-900/50 pr-2 last:border-none">
-            <div className={`h-9 w-9 rounded-xl flex items-center justify-center shrink-0 ${
-              netRevenueResult >= 0 ? "bg-emerald-500/10 border-emerald-500/20" : "bg-rose-500/10 border-rose-500/20"
-            }`}>
-              <TrendingUp className={`h-4 w-4 ${netRevenueResult >= 0 ? "text-emerald-400" : "text-rose-400"}`} />
-            </div>
-            <div>
-              <p className="text-[9px] text-slate-500 uppercase tracking-widest font-black font-mono">Accumulated Profit</p>
-              <h4 className={`text-xs font-black font-mono flex items-baseline gap-0.5 ${netRevenueResult >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {netRevenueResult >= 0 ? "+" : ""}${tradeLogs.length > 0 ? netRevenueResult.toFixed(1) : "140.0"}
-                <span className="text-[8px] text-slate-500 font-bold uppercase tracking-wider ml-1">USD Equity</span>
-              </h4>
-            </div>
-          </div>
-
-          {/* Active Target */}
-          <div className="flex items-center gap-3 last:border-none">
-            <div className="h-9 w-9 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center shrink-0">
-              <Target className="h-4 w-4 text-indigo-400" />
-            </div>
-            <div>
-              <p className="text-[9px] text-slate-500 uppercase tracking-widest font-black font-mono">Active Target</p>
-              <h4 className="text-xs font-black text-white tracking-wider uppercase font-mono">
-                {assetPair} <span className="text-indigo-400 font-semibold text-[10px] ml-1">{timeframe}</span>
-              </h4>
-            </div>
-          </div>
-
-        </div>
-      </section>
 
       {/* MAIN CONTAINER WORKSPACE */}
       <main className="max-w-7xl mx-auto px-4 mt-6">
@@ -1344,6 +1637,86 @@ export default function App() {
                     </div>
                   </div>
 
+                </div>
+
+                {/* FAST SHARE ENGINE BANNER */}
+                <div className="p-4 rounded-2xl bg-[#0b1123] border border-indigo-950/40 relative overflow-hidden space-y-4">
+                  <div className="absolute top-0 right-0 h-16 w-16 bg-indigo-500/5 rounded-full filter blur-xl pointer-events-none"></div>
+                  
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-indigo-950/40 pb-3">
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-black text-indigo-300 tracking-widest uppercase font-mono flex items-center gap-2">
+                        <Sparkles className="h-3.5 w-3.5 text-indigo-400 animate-pulse" />
+                        FAST SIGNAL SHARE • সিগন্যাল দ্রুত শেয়ার করুন
+                      </h4>
+                      <p className="text-[10px] text-slate-400">মেসেঞ্জার, হোয়াটসঅ্যাপ, ইমু ও টেলিগ্রামে এক ক্লিকে সিগন্যাল শেয়ার করুন</p>
+                    </div>
+                    {shareFeedbackMsg && (
+                      <div className="bg-emerald-950/50 border border-emerald-500/20 px-3 py-1.5 rounded-lg text-[10px] font-mono text-emerald-400 font-bold tracking-tight animate-bounce flex items-center gap-1">
+                        <span>{shareFeedbackMsg}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+                    {/* Telegram Button */}
+                    <button 
+                      onClick={() => triggerShare("telegram")}
+                      className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-sky-950/40 border border-sky-500/20 text-sky-400 hover:bg-sky-500/10 hover:border-sky-400/40 transition-all cursor-pointer font-bold text-xs"
+                    >
+                      <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M11.94 2C6.42 2 2 6.42 2 12s4.42 10 9.94 10 10.06-4.42 10.06-10S17.46 2 11.94 2zm4.56 6.8c-.14 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-1-.65-.35-1 .22-1.59.15-.15 2.71-2.48 2.76-2.69a.21.21 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.1.02-1.62 1.03-4.57 3.02-.43.3-.82.45-1.18.44-.4-.01-1.17-.23-1.74-.41-.7-.23-1.26-.35-1.21-.74.03-.2.3-.41.82-.62 3.2-1.39 5.34-2.31 6.42-2.76 3.07-1.28 3.71-1.5 4.13-1.5.09 0 .3.02.44.14.12.1.15.24.17.34a.73.73 0 01.01.18z" />
+                      </svg>
+                      Telegram
+                    </button>
+
+                    {/* WhatsApp Button */}
+                    <button 
+                      onClick={() => triggerShare("whatsapp")}
+                      className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-emerald-950/40 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10 hover:border-emerald-400/40 transition-all cursor-pointer font-bold text-xs"
+                    >
+                      <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12.012 2c-5.506 0-9.989 4.478-9.99 9.984a9.96 9.96 0 001.37 5.054L2 22l5.077-1.332a9.936 9.936 0 004.93 1.302h.005c5.507 0 9.99-4.478 9.991-9.985A9.983 9.983 0 0012.012 2zm5.834 14.16c-.252.708-1.461 1.305-2.01 1.364s-1.092.302-3.535-.684c-3.125-1.263-5.115-4.418-5.271-4.624s-1.258-1.671-1.258-3.185c0-1.513.791-2.259 1.074-2.562.282-.303.616-.379.822-.379.154 0 .308.003.442.009.141.006.33-.054.517.397.19.458.648 1.58.705 1.695.057.114.095.247.019.398-.076.151-.114.247-.229.379-.115.133-.241.296-.345.398-.115.114-.235.24-.1.472.135.232.6 1.011 1.286 1.622.883.786 1.628 1.028 1.857 1.142.229.114.362.095.495-.057.133-.151.571-.663.724-.889.152-.226.305-.189.514-.113.21.076 1.333.629 1.562.742.228.113.381.171.438.267.057.097.057.562-.195 1.27z" />
+                      </svg>
+                      WhatsApp
+                    </button>
+
+                    {/* Messenger Button */}
+                    <button 
+                      onClick={() => triggerShare("messenger")}
+                      className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-indigo-950/40 border border-indigo-500/20 text-[#0084FF] hover:bg-indigo-500/10 hover:border-indigo-400/40 transition-all cursor-pointer font-bold text-xs"
+                    >
+                      <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 2C6.34 2 2 6.13 2 11.24c0 2.68 1.19 5.08 3.12 6.74.16.14.26.35.26.57l-.02 1.74c0 .41.45.69.81.49l1.9-1.06c.16-.09.35-.11.52-.06 1.08.31 2.23.48 3.42.48 5.66 0 10-4.13 10-9.24C22 6.13 17.66 2 12 2zm1.03 11.96l-2.03-2.17-3.96 2.17c-.39.21-.83-.24-.59-.63l2.2-3.56c.17-.28.17-.63 0-.91L7.1 7.15c-.4-.42.06-.98.53-.68l3.96 2.5a.69.69 0 00.73 0l3.96-2.5c.47-.3.93.26.53.68l-2.2 2.37c-.17.28-.17.63 0 .91l2.03 2.17c.39.42-.07.98-.54.68l-3.96-2.5a.69.69 0 00-.73 0l-3.96 2.5a.4.4 0 01-.2 0z" />
+                      </svg>
+                      Messenger
+                    </button>
+
+                    {/* Imo Button */}
+                    <button 
+                      onClick={() => triggerShare("imo")}
+                      className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-blue-950/40 border border-blue-500/20 text-blue-400 hover:bg-blue-500/10 hover:border-blue-400/40 transition-all cursor-pointer font-bold text-xs"
+                    >
+                      <div className="w-5 h-5 rounded-md bg-blue-500 text-[10px] font-black text-white flex items-center justify-center font-sans tracking-tighter">imo</div>
+                      Imo APP
+                    </button>
+
+                    {/* System share */}
+                    <button 
+                      onClick={() => triggerShare("native")}
+                      className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800 hover:border-slate-700 transition-all cursor-pointer font-bold text-xs"
+                    >
+                      🗣️ System Share
+                    </button>
+
+                    {/* Copy to Clipboard */}
+                    <button 
+                      onClick={() => triggerShare("copy")}
+                      className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-indigo-600 border border-indigo-500 text-white hover:bg-indigo-500 transition-all cursor-pointer font-bold text-xs"
+                    >
+                      📋 Copy Signal
+                    </button>
+                  </div>
                 </div>
 
 
@@ -1657,77 +2030,6 @@ export default function App() {
 
             </div>
 
-            {/* PLATFORM CHART PREFERENCES FORM TRAY - FULLY AUTOMATIC */}
-            <div className="p-6 rounded-2xl bg-[#0a0f1b]/90 border border-slate-900 shadow-xl space-y-4">
-              <div className="flex items-center justify-between pb-2 border-b border-indigo-950/40">
-                <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-[#00ff66] animate-pulse"></span>
-                  <h3 className="text-xs font-black text-white tracking-widest uppercase flex items-center gap-1.5 font-mono">
-                    3. AUTOMATIC CHART CONFIGURATOR
-                  </h3>
-                </div>
-                <span className="text-[9px] font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-900/30 px-2.5 py-1 rounded font-bold uppercase tracking-wider">
-                  ⚡ INSTANT AI EXTRACTION
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                
-                {/* Automated Asset Reading */}
-                <div className="p-4 bg-[#03060c] rounded-xl border border-slate-950 flex flex-col justify-between">
-                  <div>
-                    <span className="text-[9px] font-mono text-[#5c6e91] uppercase tracking-widest block font-bold mb-1">
-                      CHART ASSET PROFILE
-                    </span>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-lg font-black font-mono text-white tracking-tight">
-                        {analysisResult?.detectedAsset || assetPair}
-                      </span>
-                      {analysisResult?.detectedAsset ? (
-                        <span className="text-[9px] text-[#00ff66] bg-[#00ff66]/10 border border-[#00ff66]/20 px-2 py-0.5 rounded uppercase font-bold font-mono">
-                          Auto-Detected
-                        </span>
-                      ) : (
-                        <span className="text-[9px] text-[#5c6e91] bg-slate-900 border border-slate-800 px-2 py-0.5 rounded uppercase font-bold font-mono">
-                          Default Ready
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <p className="text-[10px] text-slate-500 font-mono mt-3 leading-tight">
-                    Machine learning OCR algorithm scans page labels in real-time.
-                  </p>
-                </div>
-
-                {/* Automated Timeframe Reading */}
-                <div className="p-4 bg-[#03060c] rounded-xl border border-slate-950 flex flex-col justify-between">
-                  <div>
-                    <span className="text-[9px] font-mono text-[#5c6e91] uppercase tracking-widest block font-bold mb-1">
-                      CHART TIMEFRAME
-                    </span>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-lg font-black font-mono text-white tracking-tight">
-                        {analysisResult?.detectedTimeframe || timeframe}
-                      </span>
-                      {analysisResult?.detectedTimeframe ? (
-                        <span className="text-[9px] text-[#00ff66] bg-[#00ff66]/10 border border-[#00ff66]/20 px-2 py-0.5 rounded uppercase font-bold font-mono">
-                          Auto-Detected
-                        </span>
-                      ) : (
-                        <span className="text-[9px] text-[#5c6e91] bg-slate-900 border border-slate-800 px-2 py-0.5 rounded uppercase font-bold font-mono">
-                          Default Ready
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <p className="text-[10px] text-slate-500 font-mono mt-3 leading-tight">
-                    Detects the current candlestick compression interval effortlessly.
-                  </p>
-                </div>
-
-              </div>
-            </div>
-
           </div>
 
           {/* RIGHT WING: TECHNICAL ANALYSIS STUDY (5 COLUMNS) */}
@@ -1834,12 +2136,6 @@ export default function App() {
       {/* EDUCATIONAL FOOTER */}
       <footer className="mt-16 border-t border-slate-900 bg-slate-950/60 py-8 absolute bottom-0 left-0 right-0">
         <div className="max-w-4xl mx-auto px-4 text-center space-y-2">
-          <p className="text-xs text-slate-400 font-extrabold tracking-wider uppercase">
-            Q-SIGNAL ANALYZER DECODER
-          </p>
-          <p className="text-[11px] text-slate-500 leading-relaxed max-w-xl mx-auto font-sans">
-            AI signals are for educational purposes. Trading involves high risk. Binary Options speculation carries significant likelihood of initial asset drawdowns. Past simulations do not constitute guarantees of future outcome yields.
-          </p>
           <div className="flex justify-center gap-4 text-[10px] text-slate-600 font-mono">
             <span>Platform Integration Scope: Quotex / IQ Option / MT4</span>
             <span>•</span>

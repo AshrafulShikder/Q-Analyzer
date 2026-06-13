@@ -1,0 +1,35 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default catch-all safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedEmail() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "ashrafulshikder.m@gmail.com" ||
+        request.auth.token.email == "ashrafulshikder.press@gmail.com" ||
+        request.auth.token.email == "taniashikder2288@gmail.com"
+      );
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Match trade logs under individual users
+    match /users/{userId}/trades/{tradeId} {
+      allow read, write: if isOwner(userId) || isAdmin();
+    }
+  }
+}
