@@ -1,0 +1,6 @@
+{
+  "name": "Q-Signal Analyzer",
+  "description": "Analyze binary options candlestick charts, trend indicators, support and resistance levels, and receive highly probable trading signal recommendations.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
